@@ -1,0 +1,139 @@
+import json
+from datetime import datetime
+import boto3
+
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+IOT_TOPIC    = "home/bathroom/fan"
+IOT_ENDPOINT = "BSU Endpoint"  # e.g. "a123456xyz-ats.iot.us-east-1.amazonaws.com"
+
+iot_client = boto3.client(
+    "iot-data",
+    endpoint_url = f"https://{IOT_ENDPOINT}"
+)
+
+# ─── LAMBDA ENTRY POINT ────────────────────────────────────────────────────────
+def lambda_handler(event, context):
+    """
+    Routes incoming Alexa Smart Home directives to the correct handler
+    """
+    ns = event["directive"]["header"]["namespace"]
+    if   ns == "Alexa.Discovery":       return handle_discovery(event)
+    elif ns == "Alexa.PowerController": return handle_power_controller(event)
+    else:                               return handle_error(event, "Unsupported namespace")
+
+# ─── DISCOVERY ─────────────────────────────────────────────────────────────────
+def handle_discovery(event):
+    """Respond to Alexa.Discovery requests by advertising a single FAN endpoint."""
+    payload = {
+        "endpoints": [
+            {
+                "endpointId":       "fan-01",
+                "manufacturerName": "YourCompany",
+                "friendlyName":     "Living Room Fan",
+                "description":      "Smart IoT-powered Fan",
+                "displayCategories":["FAN"],
+                "cookie":          {},
+                "capabilities": [
+                    {
+                        "type":      "AlexaInterface",
+                        "interface": "Alexa.PowerController",
+                        "version":   "3",
+                        "properties": {
+                            "supported":           [ { "name": "powerState" } ],
+                            "proactivelyReported": False,
+                            "retrievable":         False
+                        }
+                    },
+                    {
+                        "type":      "AlexaInterface",
+                        "interface": "Alexa",
+                        "version":   "3"
+                    }
+                ]
+            }
+        ]
+    }
+
+    header = event["directive"]["header"]
+    return {
+        "event": {
+            "header": {
+                "namespace":      "Alexa.Discovery",
+                "name":           "Discover.Response",
+                "payloadVersion": "3",
+                "messageId":      header["messageId"]
+            },
+            "payload": payload
+        }
+    }
+
+# ─── POWER CONTROL ─────────────────────────────────────────────────────────────
+def handle_power_controller(event):
+    """
+    Turn the fan ON/OFF by publishing to IoT and respond
+    with the new powerState.
+    """
+    directive = event["directive"]
+    header    = directive["header"]
+    name      = header["name"]  # "TurnOn" or "TurnOff"
+    token     = header.get("correlationToken")
+    eid       = directive["endpoint"]["endpointId"]
+
+    # Determine target state
+    if name == "TurnOn":
+        power_state, response_name = "ON",  "TurnOn.Response"
+    else:
+        power_state, response_name = "OFF", "TurnOff.Response"
+
+    # Publish to AWS IoT
+    iot_client.publish(
+        topic   = IOT_TOPIC,
+        qos     = 0,
+        payload = json.dumps({ "state": power_state })
+    )
+
+    # Build Alexa response
+    resp_header = {
+        "namespace":       "Alexa",
+        "name":            response_name,
+        "payloadVersion":  "3",
+        "messageId":       header["messageId"],
+        "correlationToken": token
+    }
+    context = {
+        "properties": [
+            {
+                "namespace":                 "Alexa.PowerController",
+                "name":                      "powerState",
+                "value":                     power_state,
+                "timeOfSample":              datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                "uncertaintyInMilliseconds": 500
+            }
+        ]
+    }
+    return {
+        "context": context,
+        "event": {
+            "header":   resp_header,
+            "endpoint": { "endpointId": eid },
+            "payload":  {}
+        }
+    }
+
+# ─── ERROR HANDLER ─────────────────────────────────────────────────────────────
+def handle_error(event, msg):
+    header = event["directive"]["header"]
+    return {
+        "event": {
+            "header": {
+                "namespace":      "Alexa",
+                "name":           "ErrorResponse",
+                "payloadVersion": "3",
+                "messageId":      header["messageId"]
+            },
+            "payload": {
+                "type":    "INTERNAL_ERROR",
+                "message": msg
+            }
+        }
+    }
