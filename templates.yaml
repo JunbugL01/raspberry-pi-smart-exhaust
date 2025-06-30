@@ -1,0 +1,5 @@
+welcome_text: Welcome to the Device control skill. You can say, tell my device to turn on, or, tell my device to turn off
+
+command: Turning your device {{ onOffCommand }}
+
+command_reprompt: Do you want to turn your device on, or, off
